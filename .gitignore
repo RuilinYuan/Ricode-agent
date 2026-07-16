@@ -1,0 +1,5 @@
+.env
+.agent_workspace/
+__pycache__/
+*.pyc
+.claude/
