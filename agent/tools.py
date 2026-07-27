@@ -74,6 +74,18 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "search_code",
+        "description": "在整个工作目录中做语义检索，返回与查询最相关的代码片段（含路径和行号）。适合大仓库中定位相关实现，避免逐文件通读。需要先由系统建立索引。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "自然语言或代码描述，如 'CSV 编码检测逻辑'"},
+                "top_k": {"type": "integer", "description": "返回片段数量，默认 5", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "task_complete",
         "description": "任务已完成时调用此工具，传入最终总结。",
         "input_schema": {
@@ -120,6 +132,9 @@ def execute_tool(
         test_path = tool_input.get("path", ".")
         return executor.run_command(f"python -m pytest {test_path} -v --tb=short 2>&1")
 
+    if tool_name == "search_code":
+        return _search_code(tool_input, executor)
+
     # 未知工具
     from sandbox.executor import ExecutionResult as ER
     return ER(stdout="", stderr=f"未知工具：{tool_name}", exit_code=1)
@@ -138,6 +153,27 @@ def _write_file(tool_input: dict, executor: BaseExecutor) -> ExecutionResult:
         stderr="",
         exit_code=0,
     )
+
+
+def _search_code(tool_input: dict, executor: BaseExecutor) -> ExecutionResult:
+    """RAG 语义检索。索引由 AgentLoop 启动时挂在 executor.code_index 上。"""
+    index = getattr(executor, "code_index", None)
+    if index is None:
+        return ExecutionResult(
+            stdout="", exit_code=1,
+            stderr="代码索引未启用（需配置 EMBEDDING_BASE_URL / EMBEDDING_API_KEY 且 rag_enabled=True）",
+        )
+    query = tool_input.get("query", "").strip()
+    if not query:
+        return ExecutionResult(stdout="", stderr="search_code 缺少 query 参数", exit_code=1)
+    hits = index.search(query, top_k=int(tool_input.get("top_k", 5)))
+    if not hits:
+        return ExecutionResult(stdout="（无匹配结果）", stderr="", exit_code=0)
+    parts = [
+        f"### {h['path']}:{h['lines']} (score={h['score']})\n{h['text']}"
+        for h in hits
+    ]
+    return ExecutionResult(stdout="\n\n".join(parts), stderr="", exit_code=0)
 
 
 def _read_file(tool_input: dict, executor: BaseExecutor) -> ExecutionResult:

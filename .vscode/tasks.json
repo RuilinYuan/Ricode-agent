@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "agent: 全部就绪",
+      "dependsOn": ["agent: 启动后端", "agent: 编译插件"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "agent: 启动后端",
+      "type": "shell",
+      "command": "python -m uvicorn server:app --port 8765",
+      "isBackground": true,
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": {
+        "owner": "agent",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Uvicorn running",
+          "endsPattern": "Application startup complete"
+        }
+      }
+    },
+    {
+      "label": "agent: 编译插件",
+      "type": "shell",
+      "command": "npm.cmd run compile",
+      "options": { "cwd": "${workspaceFolder}/vscode-extension" },
+      "problemMatcher": ["$tsc"]
+    }
+  ]
+}

@@ -1,5 +1,20 @@
+# 隐私与环境
 .env
+*.local
+
+# 运行时产物
 .agent_workspace/
+.rag_index.npz
+output.txt
+
+# Python
 __pycache__/
 *.pyc
+
+# Node / VS Code 插件
+node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+
+# 工具
 .claude/

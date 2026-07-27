@@ -1,0 +1,15 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4F8CFF"/>
+      <stop offset="1" stop-color="#9B5CFF"/>
+    </linearGradient>
+  </defs>
+  <!-- 圆角底板 -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#g)"/>
+  <!-- 代码符号 </> -->
+  <path d="M44 48 L28 64 L44 80" stroke="white" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M84 48 L100 64 L84 80" stroke="white" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- 闪电斜杠，象征自主驱动 -->
+  <path d="M68 40 L56 68 H64 L60 88 L76 60 H66 L68 40 Z" fill="white"/>
+</svg>

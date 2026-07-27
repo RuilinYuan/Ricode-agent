@@ -22,7 +22,7 @@ from agent.context_compressor import ContextCompressor
 from agent.loop_detector import LoopDetector, LoopSignal
 from agent.tools import TOOLS, execute_tool
 from config import AgentConfig
-from sandbox.executor import LocalExecutor
+from sandbox import create_executor
 
 # ── 系统 Prompt ───────────────────────────────────────────────────────────────
 
@@ -102,9 +102,26 @@ class AgentLoop:
             os.environ.pop("ANTHROPIC_AUTH_TOKEN")
 
         self.client = ApiClient(api_key=api_key, base_url=base_url)
-        self.executor = LocalExecutor(self.config.workspace_dir)
-        self.compressor = ContextCompressor(self.config, client=None)
+        self.executor = create_executor(self.config)
+        self.compressor = ContextCompressor(self.config, client=self.client)
         self.loop_det = LoopDetector(self.config)
+
+        # RAG 代码索引：配置 embedding 服务后对仓库建索引，供 search_code 工具使用
+        if self.config.rag_enabled and self.config.embedding_base_url:
+            from agent.rag import CodeIndex
+            self.executor.code_index = CodeIndex(
+                root=self.config.workspace_dir,
+                base_url=self.config.embedding_base_url,
+                api_key=self.config.embedding_api_key,
+                model=self.config.embedding_model,
+                chunk_lines=self.config.rag_chunk_lines,
+                chunk_overlap=self.config.rag_chunk_overlap,
+            )
+            try:
+                self.executor.code_index.build()
+            except Exception as e:
+                print(f"[rag] 索引构建失败，search_code 不可用：{e}")
+                self.executor.code_index = None
 
         # 缓存管理器（Anthropic cache_control 不可用，保留框架供未来扩展）
         from agent.cache_manager import CacheManager
@@ -119,10 +136,23 @@ class AgentLoop:
 
     def run(self, task: str) -> AgentResult:
         stats = RunStats()
+
+        # ── 分层 system message：稳定层打缓存断点，状态层（任务）不缓存 ──────
+        system_msg = self.cache_mgr.get_system_message(
+            stable_text=_SYSTEM_PROMPT,
+            state_text=f"当前任务：{task}",
+        )
         messages: list[dict] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            system_msg,
             {"role": "user", "content": task},
         ]
+
+        # 启动缓存保活线程（防止稳定前缀 5 分钟过期）
+        self.cache_mgr.start_warmup(
+            client=self.client,
+            model=self.config.model,
+            stable_system_msg=system_msg,
+        )
 
         self._emit({"type": "start", "task": task})
 
@@ -130,11 +160,12 @@ class AgentLoop:
             stats.rounds = round_num
             self._emit({"type": "round", "num": round_num})
 
-            # ── API 调用 ────────────────────────────────────────────────────
+            # ── API 调用（发送前在历史尾部插入缓存断点）──────────────────────
             try:
+                cached_messages = self.cache_mgr.add_cache_breakpoint(messages)
                 response = self.client.chat_completion(
                     model=self.config.model,
-                    messages=messages,
+                    messages=cached_messages,
                     tools=OPENAI_TOOLS,
                     max_tokens=self.config.max_tokens,
                 )
@@ -224,17 +255,19 @@ class AgentLoop:
 
             # 任务完成
             if task_done:
+                self.cache_mgr.stop_warmup()
                 return AgentResult(success=True, summary=task_summary, stats=stats)
 
-            # ── Token 水位检查（简易版：计算估算 token 数）─────────────────
-            est_tokens = sum(len(_msg_text(m)) for m in messages) // 4
-            ratio = est_tokens / self.config.context_window
-            if ratio >= 0.85 and len(messages) > 20:
-                # 简易裁剪：保留最近 20 条
-                old_count = len(messages) - 20
-                messages = [_make_summary_msg(messages[:old_count])] + messages[old_count:]
+            # ── Token 水位检查与分层压缩 ────────────────────────────────────
+            compress_result = self.compressor.check_and_compress(messages)
+            if compress_result.level_applied > 0:
+                messages = compress_result.messages
                 stats.compressions += 1
-                self._emit({"type": "compress", "level": 3, "tokens_saved": est_tokens // 3})
+                self._emit({
+                    "type": "compress",
+                    "level": compress_result.level_applied,
+                    "tokens_saved": compress_result.tokens_saved,
+                })
 
             # ── 循环检测 ────────────────────────────────────────────────────
             self.loop_det.record(
@@ -253,6 +286,7 @@ class AgentLoop:
                 })
 
             if signal == LoopSignal.HEAVY:
+                self.cache_mgr.stop_warmup()
                 result = AgentResult(
                     success=False,
                     reason="loop_detected",
@@ -269,6 +303,7 @@ class AgentLoop:
                     self.loop_det.reset()
 
         # 超过最大轮次
+        self.cache_mgr.stop_warmup()
         result = AgentResult(
             success=False,
             reason="max_rounds_exceeded",

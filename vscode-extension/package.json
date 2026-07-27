@@ -1,0 +1,69 @@
+{
+  "name": "autonomous-coding-agent",
+  "displayName": "Ricode Agent",
+  "description": "在 VS Code 中驱动自主编程 Agent：提交任务，实时查看工具调用、执行结果与压缩事件",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Chat", "Other"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codingAgent.openPanel",
+        "title": "Ricode Agent: 打开面板",
+        "icon": "$(sparkle)"
+      }
+    ],
+    "configuration": {
+      "title": "Ricode Agent",
+      "properties": {
+        "codingAgent.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "Agent 后端地址（uvicorn server:app）"
+        },
+        "codingAgent.sandbox": {
+          "type": "string",
+          "enum": ["local", "docker"],
+          "default": "docker",
+          "description": "代码执行沙箱后端"
+        },
+        "codingAgent.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "激活插件时自动启动 Python 后端（uvicorn）"
+        },
+        "codingAgent.projectRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Agent 项目根目录（server.py 所在目录），留空则自动推断为插件上级目录"
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        { "command": "codingAgent.openPanel" }
+      ],
+      "editor/title": [
+        {
+          "command": "codingAgent.openPanel",
+          "group": "navigation",
+          "when": "true"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.24.0"
+  }
+}
