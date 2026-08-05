@@ -40,6 +40,9 @@ class AgentConfig:
     # L4：兜底时保护最近 N 条工具结果不清理
     l4_keep_recent_tools: int = 3
 
+    # 分层压缩总开关（评测 A/B 对比用，COMPRESSION_ENABLED=0 关闭）
+    compression_enabled: bool = os.environ.get("COMPRESSION_ENABLED", "1") == "1"
+
     # ── 循环检测阈值 ──────────────────────────────────────────────
     loop_light_rounds: int = 3     # 告警 + 注入提示
     loop_medium_rounds: int = 5    # 强制换策略

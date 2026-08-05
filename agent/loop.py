@@ -259,15 +259,16 @@ class AgentLoop:
                 return AgentResult(success=True, summary=task_summary, stats=stats)
 
             # ── Token 水位检查与分层压缩 ────────────────────────────────────
-            compress_result = self.compressor.check_and_compress(messages)
-            if compress_result.level_applied > 0:
-                messages = compress_result.messages
-                stats.compressions += 1
-                self._emit({
-                    "type": "compress",
-                    "level": compress_result.level_applied,
-                    "tokens_saved": compress_result.tokens_saved,
-                })
+            if self.config.compression_enabled:
+                compress_result = self.compressor.check_and_compress(messages)
+                if compress_result.level_applied > 0:
+                    messages = compress_result.messages
+                    stats.compressions += 1
+                    self._emit({
+                        "type": "compress",
+                        "level": compress_result.level_applied,
+                        "tokens_saved": compress_result.tokens_saved,
+                    })
 
             # ── 循环检测 ────────────────────────────────────────────────────
             self.loop_det.record(

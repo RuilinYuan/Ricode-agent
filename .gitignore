@@ -22,3 +22,16 @@ vscode-extension/*.vsix
 # 本地文档与实验目录（不公开）
 project2-autonomous-coding-agent.md
 ctx-compress-opt-bundle/
+.agent_workspace_*/
+benchmarks/*.json
+
+# 评测（eval/）：大体积可再生产物不入库
+# 保留：eval/*.py、eval/README.md、eval/data/（任务清单与结果报告）
+# 源码 zip 缓存（~0.5 GB）
+eval/repos/
+# 每任务一份仓库工作区（数 GB）
+eval/workspaces/
+# 每任务一个独立 Python 环境（数 GB）
+eval/venvs/
+# 逐事件原始日志（已汇总进 eval/data/all_results.json）
+eval/runs/
