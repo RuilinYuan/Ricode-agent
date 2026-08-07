@@ -59,9 +59,10 @@ class LocalExecutor(BaseExecutor):
     代码写入临时文件后执行，避免 shell 注入。
     """
 
-    def __init__(self, work_dir: str = ".agent_workspace") -> None:
+    def __init__(self, work_dir: str = ".agent_workspace", exec_timeout: int = 30) -> None:
         self.work_dir = Path(work_dir)
         self.work_dir.mkdir(exist_ok=True)
+        self.exec_timeout = exec_timeout
 
     def run_python(self, code: str, timeout: int = 30) -> ExecutionResult:
         # 写临时 .py 文件，确保多行代码、中文路径均正常
@@ -80,6 +81,8 @@ class LocalExecutor(BaseExecutor):
                 [sys.executable, tmp_path],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 cwd=str(self.work_dir),
             )
@@ -107,6 +110,8 @@ class LocalExecutor(BaseExecutor):
                 shell=True,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
                 cwd=str(self.work_dir),
             )

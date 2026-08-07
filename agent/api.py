@@ -2,10 +2,12 @@
 API 客户端封装
 ─────────────
 使用 httpx 直接调用 OpenAI-compatible API，不依赖任何 SDK 版本。
+支持指数退避重试（502/503/504/超时）。
 """
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,6 +18,8 @@ import httpx
 class ApiUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -32,15 +36,28 @@ class ApiResponse:
     finish_reason: str = ""
     usage: ApiUsage = field(default_factory=ApiUsage)
     raw: dict = field(default_factory=dict)
+    retry_count: int = 0  # 本次请求实际重试次数
+
+
+_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 class ApiClient:
-    """OpenAI-compatible API 客户端，用 httpx 裸调。"""
+    """OpenAI-compatible API 客户端，用 httpx 裸调，内置指数退避重试。"""
 
-    def __init__(self, api_key: str, base_url: str) -> None:
+    def __init__(self, api_key: str, base_url: str,
+                 max_retries: int = 3,
+                 retry_base_delay: float = 1.0,
+                 retry_max_delay: float = 60.0) -> None:
         self.api_key = api_key
-        # 确保 base_url 以 /v1 结尾（OpenAI SDK 也是这样处理）
-        self.base_url = base_url.rstrip("/")
+        # 确保 base_url 以 /v1 结尾（裸域名时自动补上）
+        base = base_url.rstrip("/")
+        if not base.endswith("/v1"):
+            base += "/v1"
+        self.base_url = base
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
         self._client = httpx.Client(timeout=httpx.Timeout(600.0))
 
     def chat_completion(
@@ -60,31 +77,89 @@ class ApiClient:
         if tools:
             body["tools"] = tools
 
-        resp = self._client.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json=body,
-        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
-        # 检查 HTTP 错误
-        if resp.status_code >= 400:
+        last_error: Exception | None = None
+        retry_count = 0
+
+        for attempt in range(self.max_retries + 1):
             try:
-                detail = resp.json()
-            except Exception:
-                detail = resp.text[:500]
-            raise ApiError(resp.status_code, detail)
+                resp = self._client.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
+                )
 
-        data = resp.json()
+                # 可重试的 HTTP 错误（502/503/504/429）
+                if resp.status_code in _RETRYABLE_STATUS and attempt < self.max_retries:
+                    retry_count += 1
+                    delay = min(
+                        self.retry_base_delay * (2 ** attempt),
+                        self.retry_max_delay,
+                    )
+                    detail = resp.text[:200]
+                    print(f"[api] {resp.status_code}，{delay:.1f}s 后重试 ({retry_count}/{self.max_retries}): {detail}")
+                    time.sleep(delay)
+                    continue
 
-        # 解析 usage
+                # 不可重试的错误（4xx 非 429）
+                if resp.status_code >= 400:
+                    try:
+                        detail = resp.json()
+                    except Exception:
+                        detail = resp.text[:500]
+                    raise ApiError(resp.status_code, detail)
+
+                # 成功
+                data = resp.json()
+                return self._parse_response(data, retry_count)
+
+            except httpx.TimeoutException as e:
+                retry_count += 1
+                if attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay * (2 ** attempt),
+                        self.retry_max_delay,
+                    )
+                    print(f"[api] 请求超时，{delay:.1f}s 后重试 ({retry_count}/{self.max_retries})")
+                    time.sleep(delay)
+                    continue
+                last_error = e
+
+            except httpx.RequestError as e:
+                # 网络层错误（连接重置等）也重试
+                retry_count += 1
+                if attempt < self.max_retries:
+                    delay = min(
+                        self.retry_base_delay * (2 ** attempt),
+                        self.retry_max_delay,
+                    )
+                    print(f"[api] 网络错误: {e}，{delay:.1f}s 后重试 ({retry_count}/{self.max_retries})")
+                    time.sleep(delay)
+                    continue
+                last_error = e
+
+        # 所有重试均失败
+        raise ApiError(0, f"重试 {self.max_retries} 次后仍失败: {last_error}")
+
+    def _parse_response(self, data: dict, retry_count: int) -> ApiResponse:
+        """解析 API 响应为 ApiResponse。"""
+        # 解析 usage（兼容多种缓存字段命名）
         usage_raw = data.get("usage", {})
+        details = usage_raw.get("prompt_tokens_details") or {}
         usage = ApiUsage(
             prompt_tokens=usage_raw.get("prompt_tokens", 0),
             completion_tokens=usage_raw.get("completion_tokens", 0),
+            cache_read_tokens=(
+                usage_raw.get("cache_read_input_tokens", 0)
+                or usage_raw.get("prompt_cache_hit_tokens", 0)
+                or details.get("cached_tokens", 0)
+            ),
+            cache_write_tokens=usage_raw.get("cache_creation_input_tokens", 0),
         )
 
         # 解析 message
@@ -111,6 +186,7 @@ class ApiClient:
             finish_reason=choice.get("finish_reason", ""),
             usage=usage,
             raw=data,
+            retry_count=retry_count,
         )
 
 

@@ -25,4 +25,4 @@ def create_executor(config) -> BaseExecutor:
         except RuntimeError as e:
             print(f"[sandbox] Docker 不可用，回退本地执行：{e}")
 
-    return LocalExecutor(config.workspace_dir)
+    return LocalExecutor(config.workspace_dir, exec_timeout=getattr(config, "exec_timeout", 30))

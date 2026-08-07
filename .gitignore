@@ -24,6 +24,9 @@ project2-autonomous-coding-agent.md
 ctx-compress-opt-bundle/
 .agent_workspace_*/
 benchmarks/*.json
+loop-test/workspaces/
+loop-test/results*.jsonl
+loop-test/__pycache__/
 
 # 评测（eval/）：大体积可再生产物不入库
 # 保留：eval/*.py、eval/README.md、eval/data/（任务清单与结果报告）

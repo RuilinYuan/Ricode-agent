@@ -122,7 +122,7 @@ def execute_tool(
     if tool_name == "execute_python":
         return executor.run_python(
             tool_input["code"],
-            timeout=executor.__class__.__dict__.get("exec_timeout", 30),
+            timeout=getattr(executor, "exec_timeout", 30),
         )
 
     if tool_name == "run_command":

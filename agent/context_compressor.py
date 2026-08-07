@@ -1,13 +1,19 @@
 """
-分层上下文压缩（改进版）
-──────────────────────
-使用 tiktoken 精确估算 Token 水位，按阈值逐级触发压缩，
-信息损失从低到高：
+分层上下文压缩
+────────────
+参考 Claude Code 五层防线设计，四层按成本从低到高累积执行：
 
-  L1 (60%) 工具结果持久化：两级预算，整块存磁盘，context 保留预览引用
-  L2 (75%) 删除 thinking / reasoning：近零损失，先于历史裁剪
-  L3 (85%) 逐轮 LLM 摘要：按需停手，6 字段结构化，按轮次逐步压缩
-  L4 (95%) 单轮溢出兜底：5 步递进，处理当前轮本身超限的极端情况
+  L1 (60%) 删除 thinking / reasoning：近零损失，永远最先做
+           —— 对应 Claude Code 的 clear_thinking_20251015
+  L2 (70%) 工具结果持久化：按长度降序逐个外置，水位回落到 70% 即停
+           —— 对应 Claude Code 的 Client microCompact
+  L3 (80%) 激进本地清理：5 步递进，不调 LLM
+           —— 对应 Claude Code 的 Time-based MC
+  L4 (90%) 逐轮 LLM 摘要：最贵手段，只有本地三招全用尽后才上
+           —— 对应 Claude Code 的 autoCompact (fork agent)
+
+每轮累积执行：L1 做完重估水位→还在 L2 阈值之上就 L2→还在 L3 之上就 L3→...
+不是"择一执行"，而是"从低到高逐层累加"，每层贡献自己的部分。
 """
 from __future__ import annotations
 
@@ -100,80 +106,131 @@ class ContextCompressor:
 
     def check_and_compress(self, messages: list[dict]) -> CompressionResult:
         """
-        内部用 tiktoken 估算水位，按需逐级压缩。
+        进入水位决定打到第几层，打完即停，不中途重估、不接力：
+
+          < 60%  → 不打
+          60-70% → L1         删除 thinking
+          70-80% → L1+L2      删 thinking + 工具外置
+          80-90% → L1+L2+L3   再加激进本地清理
+          ≥ 90%  → L1+L2+L3+L4  再加 LLM 摘要
+
+        设计理念：压缩是"缓解"不是"治愈"——打完预定层级就收手，
+        不保证水位一定回落到某个阈值以下。如果下一轮水位还在高位，
+        下一轮继续按 band 打。
+
         返回（可能已修改的）消息列表与压缩元数据。
         """
-        tokens = _estimate_tokens(messages)
-        ratio = tokens / self.config.context_window
+        def _ratio(msgs: list[dict]) -> float:
+            return _estimate_tokens(msgs) / self.config.context_window
 
+        ratio = _ratio(messages)
+
+        # < 60% → 不触发
+        if ratio < self.config.context_l1_threshold:
+            return CompressionResult(messages, 0, 0)
+
+        # 进入水位决定最大层级
         if ratio >= self.config.context_l4_threshold:
-            return self._compress_l4(messages, tokens)
-        if ratio >= self.config.context_l3_threshold:
-            return self._compress_l3(messages, tokens)
-        if ratio >= self.config.context_l2_threshold:
-            return self._compress_l2(messages)
-        if ratio >= self.config.context_l1_threshold:
-            return self._compress_l1(messages)
-        return CompressionResult(messages, 0, 0)
+            max_level = 4
+        elif ratio >= self.config.context_l3_threshold:
+            max_level = 3
+        elif ratio >= self.config.context_l2_threshold:
+            max_level = 2
+        else:
+            max_level = 1
 
-    # ── L1：工具结果持久化（两级预算）──────────────────────────────────────────
+        result = messages
+        total_saved = 0
+        applied = 0
+
+        # ── L1：删除 thinking ────────────────────────────────────────────
+        r = self._compress_l2(result)
+        if r.tokens_saved > 0:
+            result = r.messages
+            total_saved += r.tokens_saved
+            applied = 1
+
+        if max_level < 2:
+            return CompressionResult(result, applied, total_saved)
+
+        # ── L2：工具结果外置 ─────────────────────────────────────────────
+        r = self._compress_l1(result)
+        if r.tokens_saved > 0:
+            result = r.messages
+            total_saved += r.tokens_saved
+            applied = 2
+
+        if max_level < 3:
+            return CompressionResult(result, applied, total_saved)
+
+        # ── L3：激进本地清理 ─────────────────────────────────────────────
+        r = self._compress_l4(result, _estimate_tokens(result))
+        if r.tokens_saved > 0:
+            result = r.messages
+            total_saved += r.tokens_saved
+            applied = 3
+
+        if max_level < 4:
+            return CompressionResult(result, applied, total_saved)
+
+        # ── L4：LLM 摘要 ─────────────────────────────────────────────────
+        r = self._compress_l3(result, _estimate_tokens(result))
+        if r.tokens_saved > 0:
+            result = r.messages
+            total_saved += r.tokens_saved
+            applied = 4
+
+        return CompressionResult(result, applied, total_saved)
+
+    # ── L2：工具结果外置 ─────────────────────────────────────────────────────
 
     def _compress_l1(self, messages: list[dict]) -> CompressionResult:
         """
-        两级预算：
-          一级：单条 tool 消息超 l1_persist_threshold 字符 → 整块写磁盘，保留预览引用
-          二级：同批工具结果合计 token 超 l1_batch_budget → 从大到小继续转存，直到回落
+        所有 tool 消息按内容长度降序排列，逐个外置到磁盘，
+        每搬一条重估水位，回落到 L2 阈值（70%）以下就停手。
+
+        如果预览文本比原文还长（比如原文极短），跳过不搬，
+        避免"搬完反而占用更多 token"的倒挂。
         """
         result = list(messages)
         tokens_saved = 0
 
-        # ── 一级：单条超阈值 ───────────────────────────────────────────────────
+        # 收集所有 tool 消息（跳过已经外置过的）
+        tool_entries = []
         for i, msg in enumerate(result):
             if msg.get("role") != "tool":
                 continue
             content = msg.get("content", "")
-            if not isinstance(content, str):
+            if not isinstance(content, str) or "已存至" in content:
                 continue
-            if len(content) <= self.config.l1_persist_threshold:
-                continue
+            tool_entries.append((i, len(content)))
 
+        # 降序：大象优先
+        tool_entries.sort(key=lambda x: x[1], reverse=True)
+
+        for i, _ in tool_entries:
+            # 已经回落到 L2 水位以下 → 停
+            if _estimate_tokens(result) / self.config.context_window < self.config.context_l2_threshold:
+                break
+
+            content = result[i]["content"]
             filepath = self._persist(content)
+            # 头尾截断：各取 200 字符，因为报错/结论常在末尾
+            snippet = _head_tail_truncate(content, 400, tail_ratio=0.5)
             preview = (
-                content[:200]
-                + f"\n...[内容已存至 {filepath.name}，共 {len(content)} 字符，"
-                f"可用 read_file 工具读取]"
+                f"[工具输出已压缩]\n"
+                f"{snippet}\n"
+                f"── 共 {len(content)} 字符，完整内容: {filepath.name}"
             )
-            result[i] = {**msg, "content": preview}
-            tokens_saved += (len(content) - len(preview)) // 4
 
-        # ── 二级：批量合计超预算 ───────────────────────────────────────────────
-        tool_indices = [i for i, m in enumerate(result) if m.get("role") == "tool"]
-        batch_tokens = sum(_estimate_tokens([result[i]]) for i in tool_indices)
+            # 预览比原文还长 → 搬了反而亏，跳过
+            if len(preview) >= len(content):
+                continue
 
-        if batch_tokens > self.config.l1_batch_budget:
-            # 按内容长度降序，优先转存最大的
-            sorted_indices = sorted(
-                tool_indices,
-                key=lambda i: len(result[i].get("content", "")),
-                reverse=True,
-            )
-            for i in sorted_indices:
-                if batch_tokens <= self.config.l1_batch_budget:
-                    break
-                content = result[i].get("content", "")
-                if not isinstance(content, str) or "已存至" in content:
-                    continue  # 已经是预览，跳过
-                before = _estimate_tokens([result[i]])
-                filepath = self._persist(content)
-                preview = (
-                    content[:200]
-                    + f"\n...[批量预算超限，已存至 {filepath.name}]"
-                )
-                result[i] = {**result[i], "content": preview}
-                after = _estimate_tokens([result[i]])
-                saved = before - after
-                batch_tokens -= saved
-                tokens_saved += saved
+            before = _estimate_tokens([result[i]])
+            result[i] = {**result[i], "content": preview}
+            after = _estimate_tokens([result[i]])
+            tokens_saved += max(0, before - after)
 
         return CompressionResult(result, 1, tokens_saved)
 
