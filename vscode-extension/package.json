@@ -27,7 +27,7 @@
         "codingAgent.sandbox": {
           "type": "string",
           "enum": ["local", "docker"],
-          "default": "docker",
+          "default": "local",
           "description": "代码执行沙箱后端"
         },
         "codingAgent.autoStartBackend": {

@@ -7,9 +7,34 @@
  */
 import * as vscode from "vscode";
 import * as path from "path";
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, execSync } from "child_process";
 
 let backend: ChildProcess | undefined;
+
+/** 探测可用的 Python 解释器路径（Windows / macOS / Linux 通用） */
+function findPython(): string | null {
+  const candidates = [
+    "python",
+    "python3",
+    "py",                       // Windows py launcher
+    "py.exe",
+  ];
+  for (const name of candidates) {
+    try {
+      const out = execSync(`${name} -c "import sys; print(sys.executable)"`, {
+        timeout: 4000,
+        encoding: "utf-8",
+        shell: process.platform === "win32" ? "cmd.exe" : "/bin/sh",
+      }).trim();
+      if (out && out.includes("python")) {
+        return name; // 这个 name 在 PATH 中可用
+      }
+    } catch {
+      // 继续试下一个
+    }
+  }
+  return null;
+}
 
 export function activate(context: vscode.ExtensionContext) {
   const cfg = vscode.workspace.getConfiguration("codingAgent");
@@ -45,14 +70,39 @@ async function ensureBackend(
     path.resolve(context.extensionPath, ".."); // 插件位于项目根目录的 vscode-extension/ 下
 
   vscode.window.setStatusBarMessage("$(sync~spin) Ricode Agent 后端启动中…", 10000);
+
+  // 探测可用的 Python（Windows 上 VS Code 可能找不到 PATH 中的 python）
+  const pythonExe = await findPython();
+  if (!pythonExe) {
+    vscode.window.showErrorMessage(
+      "Ricode Agent 找不到 Python。请在终端手动启动：python -m uvicorn server:app --port " + port
+    );
+    return;
+  }
+
   backend = spawn(
-    "python",
+    pythonExe,
     ["-m", "uvicorn", "server:app", "--port", port],
-    { cwd: projectRoot, shell: true, stdio: "ignore" }
+    { cwd: projectRoot, shell: true }
   );
   backend.on("error", (e) => {
     vscode.window.showErrorMessage(`Ricode Agent 后端启动失败：${e.message}`);
   });
+  // 捕获 stderr 以便排查启动失败
+  if (backend.stderr) {
+    let stderrLog = "";
+    backend.stderr.on("data", (chunk) => {
+      stderrLog += chunk;
+      if (stderrLog.length > 3000) stderrLog = stderrLog.slice(-2000);
+    });
+    backend.on("close", (code) => {
+      if (code !== 0 && code !== null) {
+        vscode.window.showErrorMessage(
+          `Ricode Agent 后端异常退出 (code=${code})：${stderrLog.slice(-400)}`
+        );
+      }
+    });
+  }
 
   // 轮询等待就绪（最多 30 秒）
   for (let i = 0; i < 30; i++) {
@@ -134,7 +184,7 @@ class AgentPanel {
   private async runTask(task: string) {
     const cfg = vscode.workspace.getConfiguration("codingAgent");
     const serverUrl = cfg.get<string>("serverUrl", "http://127.0.0.1:8765");
-    const sandbox = cfg.get<string>("sandbox", "docker");
+    const sandbox = cfg.get<string>("sandbox", "local");
     const workspace = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     this.abort = new AbortController();
@@ -146,24 +196,34 @@ class AgentPanel {
         signal: this.abort.signal,
       });
       if (!resp.ok || !resp.body) {
-        this.post({ type: "error", message: `HTTP ${resp.status}` });
+        this.post({ type: "error", message: `HTTP ${resp.status}: ${await resp.text()}` });
         return;
       }
+
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+
         buffer += decoder.decode(value, { stream: true });
+
         // SSE 帧以空行分隔
         const frames = buffer.split("\n\n");
         buffer = frames.pop() ?? "";
+
         for (const frame of frames) {
           const line = frame.trim();
           if (line.startsWith("data:")) {
-            const event = JSON.parse(line.slice(5).trim()) as AgentEvent;
-            this.post({ type: "event", event });
+            try {
+              const event = JSON.parse(line.slice(5).trim()) as AgentEvent;
+              this.post({ type: "event", event });
+            } catch (parseErr) {
+              // 单行解析失败不中断整个流，只记录到 console
+              console.warn("[Ricode] SSE 帧解析失败:", parseErr, line.slice(0, 200));
+            }
           }
         }
       }
