@@ -271,17 +271,34 @@ class AgentLoop:
             stats.rounds = round_num
             self._emit({"type": "round", "num": round_num})
 
-            # ── API 调用（发送前在历史尾部插入缓存断点）──────────────────────
+            # ── API 调用（发送前在历史尾部插入缓存断点，流式接收）──────────────
             try:
                 if self.config.cache_enabled:
                     cached_messages = self.cache_mgr.add_cache_breakpoint(messages)
                 else:
                     cached_messages = messages
+
+                # 如果有 cache_edits，附加到请求中（仅 Claude）
+                extra_params = {}
+                if hasattr(self, '_pending_cache_edits') and self._pending_cache_edits:
+                    extra_params["cache_edits"] = self._pending_cache_edits
+                    self._pending_cache_edits = []  # 清空
+
+                # 流式回调：逐 chunk 推送到 UI
+                def _on_stream_chunk(delta: str, accumulated: str) -> None:
+                    self._emit({
+                        "type": "reasoning_delta",
+                        "delta": delta,
+                        "accumulated": accumulated,
+                    })
+
                 response = self.client.chat_completion(
                     model=self.config.model,
                     messages=cached_messages,
                     tools=OPENAI_TOOLS,
                     max_tokens=self.config.max_tokens,
+                    stream_callback=_on_stream_chunk,
+                    **extra_params
                 )
                 if response.retry_count > 0:
                     stats.api_errors += response.retry_count
@@ -429,8 +446,18 @@ class AgentLoop:
                 if compress_result.level_applied > 0:
                     messages = compress_result.messages
                     stats.compressions += 1
-                    logger.debug("压缩 L%d 触发，节省约 %d tokens",
-                                compress_result.level_applied, compress_result.tokens_saved)
+
+                    # 如果有 cache_edits，保存到待发送队列（仅 Claude）
+                    if compress_result.cache_edits:
+                        if not hasattr(self, '_pending_cache_edits'):
+                            self._pending_cache_edits = []
+                        self._pending_cache_edits.extend(compress_result.cache_edits)
+                        logger.debug("压缩 L%d 触发（Cache Edits），节省约 %d tokens",
+                                    compress_result.level_applied, compress_result.tokens_saved)
+                    else:
+                        logger.debug("压缩 L%d 触发，节省约 %d tokens",
+                                    compress_result.level_applied, compress_result.tokens_saved)
+
                     self._emit({
                         "type": "compress",
                         "level": compress_result.level_applied,

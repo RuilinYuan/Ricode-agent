@@ -342,7 +342,15 @@ with tab_log:
             st.divider()
             st.caption(f"第 {event['num']} 轮")
 
+        elif t == "reasoning_delta":
+            # 流式增量：实时显示（不折叠，直接在日志流中渲染）
+            text = event.get("accumulated", "")
+            if text:
+                with st.expander(f"💭 思考中... ({len(text)} 字符)", expanded=True):
+                    st.text(text[-2000:] if len(text) > 2000 else text)
+
         elif t == "reasoning":
+            # 非流式完整 reasoning（兼容）
             text = event.get("text", "").strip()
             if text:
                 with st.expander("💭 思考过程", expanded=False):

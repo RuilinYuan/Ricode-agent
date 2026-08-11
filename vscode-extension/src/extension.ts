@@ -309,6 +309,13 @@ function renderHtml(): string {
     font-size: 13px; line-height: 1.65; margin: 6px 0;
     white-space: pre-wrap; word-break: break-word;
   }
+  .reasoning.streaming::after {
+    content: "▌";
+    animation: blink 1s step-end infinite;
+    color: var(--vscode-charts-blue);
+    font-size: 14px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
   .card {
     margin: 6px 0; border: 1px solid var(--vscode-panel-border);
     border-radius: 8px; overflow: hidden; font-size: 12px;
@@ -492,6 +499,10 @@ function renderHtml(): string {
     scrollBottom();
   }
 
+  // ── 流式渲染：当前正在累积的 reasoning 元素 ─────────────────────────
+  let currentReasoningEl = null;
+  let currentReasoningText = "";
+
   window.addEventListener("message", (e) => {
     const msg = e.data;
     if (msg.type === "error") { el("notice error", "⚠ " + msg.message); setRunning(false); return; }
@@ -500,11 +511,41 @@ function renderHtml(): string {
     const ev = msg.event;
     switch (ev.type) {
       case "round":
+        // 新一轮：清空当前流式元素
+        currentReasoningEl = null;
+        currentReasoningText = "";
         el("round-divider", "Round " + ev.num); break;
-      case "reasoning":
-        el("reasoning", ev.text); break;
+
+      case "reasoning_delta": {
+        // 流式增量：追加到当前 reasoning 元素
+        if (!currentReasoningEl) {
+          currentReasoningEl = el("reasoning", "");
+          currentReasoningText = "";
+        }
+        currentReasoningText = ev.accumulated || (currentReasoningText + ev.delta);
+        currentReasoningEl.textContent = currentReasoningText;
+        scrollBottom();
+        break;
+      }
+
+      case "reasoning": {
+        // 非流式完整 reasoning（兼容旧事件）：如果没有流式元素则创建
+        if (!currentReasoningEl) {
+          el("reasoning", ev.text);
+        } else {
+          // 已有流式元素，替换为完整内容
+          currentReasoningEl.textContent = ev.text;
+          currentReasoningText = ev.text;
+        }
+        break;
+      }
+
       case "tool_call":
+        // 工具调用前重置流式元素（reasoning 结束）
+        currentReasoningEl = null;
+        currentReasoningText = "";
         toolCard(ev.name, ev.input); break;
+
       case "tool_result":
         fillResult(ev.name, ev.output, ev.success); break;
       case "compress":
@@ -518,6 +559,8 @@ function renderHtml(): string {
         el("notice stats",
           (r.success ? "任务成功" : "任务未完成（" + (r.reason || "") + "）") +
           " · " + r.rounds + " 轮 · tokens " + r.input_tokens + "↑ / " + r.output_tokens + "↓");
+        currentReasoningEl = null;
+        currentReasoningText = "";
         setRunning(false); break;
       }
     }
