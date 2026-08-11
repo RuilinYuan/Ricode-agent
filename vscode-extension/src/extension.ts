@@ -210,21 +210,46 @@ class AgentPanel {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE 帧以空行分隔
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
+        // SSE 帧以 "data: " 开头，逐行处理避免 JSON 中的 \n\n 导致帧切割错误
+        // 策略：找到所有 "data: " 起始位置，每段到下一个 "data: " 或流末尾
+        let searchFrom = 0;
+        for (;;) {
+          const idx = buffer.indexOf("data: ", searchFrom);
+          if (idx === -1) break;
 
-        for (const frame of frames) {
-          const line = frame.trim();
-          if (line.startsWith("data:")) {
+          // 找下一帧的起始（从当前帧 data 之后开始搜）
+          const nextIdx = buffer.indexOf("data: ", idx + 6);
+          const jsonStr = nextIdx === -1
+            ? buffer.slice(idx + 6).trim()
+            : buffer.slice(idx + 6, nextIdx).trim();
+
+          if (jsonStr) {
             try {
-              const event = JSON.parse(line.slice(5).trim()) as AgentEvent;
+              const event = JSON.parse(jsonStr) as AgentEvent;
               this.post({ type: "event", event });
             } catch (parseErr) {
-              // 单行解析失败不中断整个流，只记录到 console
-              console.warn("[Ricode] SSE 帧解析失败:", parseErr, line.slice(0, 200));
+              // 帧可能不完整（在下一个 chunk 到达时补全），保留在 buffer 中
+              if (nextIdx !== -1) {
+                // 有完整帧但解析失败 → 数据真的坏了，跳过
+                console.warn("[Ricode] SSE 帧解析失败:", parseErr, jsonStr.slice(0, 200));
+              } else {
+                // 不完整帧，等下一个 chunk
+                break;
+              }
             }
           }
+
+          if (nextIdx === -1) {
+            // 最后一个不完整帧，保留在 buffer
+            buffer = buffer.slice(idx);
+            break;
+          }
+          searchFrom = nextIdx;
+        }
+
+        // 如果 buffer 太大且没有 "data: " 开头，丢弃
+        if (buffer.length > 100000 && !buffer.startsWith("data: ")) {
+          buffer = "";
         }
       }
     } catch (e) {
