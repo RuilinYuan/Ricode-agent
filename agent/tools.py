@@ -108,11 +108,17 @@ def execute_tool(
     tool_name: str,
     tool_input: dict,
     executor: BaseExecutor,
+    on_output=None,
 ) -> ExecutionResult:
     """
     根据工具名将调用路由到对应的 executor 方法。
     task_complete 由主循环在调用本函数之前拦截，不会到达这里。
+
+    on_output: 可选的逐行输出回调，传给支持流式的执行方法
+               （run_command / run_python / run_tests）。
     """
+    timeout = getattr(executor, "exec_timeout", 30)
+
     if tool_name == "write_file":
         return _write_file(tool_input, executor)
 
@@ -122,15 +128,24 @@ def execute_tool(
     if tool_name == "execute_python":
         return executor.run_python(
             tool_input["code"],
-            timeout=getattr(executor, "exec_timeout", 30),
+            timeout=timeout,
+            on_output=on_output,
         )
 
     if tool_name == "run_command":
-        return executor.run_command(tool_input["command"])
+        return executor.run_command(
+            tool_input["command"],
+            timeout=timeout,
+            on_output=on_output,
+        )
 
     if tool_name == "run_tests":
         test_path = tool_input.get("path", ".")
-        return executor.run_command(f"python -m pytest {test_path} -v --tb=short 2>&1")
+        return executor.run_command(
+            f"python -m pytest {test_path} -v --tb=short 2>&1",
+            timeout=timeout,
+            on_output=on_output,
+        )
 
     if tool_name == "search_code":
         return _search_code(tool_input, executor)

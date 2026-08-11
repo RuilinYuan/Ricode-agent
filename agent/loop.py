@@ -404,10 +404,25 @@ class AgentLoop:
                     self._emit({"type": "task_complete", "summary": task_summary})
                     break
 
-                self._emit({"type": "tool_call", "name": tool_name, "input": tool_input})
+                self._emit({"type": "tool_call", "name": tool_name,
+                            "tool_call_id": tc.id, "input": tool_input})
                 logger.debug("工具调用: %s", tool_name)
 
-                exec_res = execute_tool(tool_name, tool_input, self.executor)
+                # 流式输出回调：命令每产生一行就推送到 UI
+                _tc_id = tc.id
+
+                def _on_tool_output(line: str, _cid=_tc_id, _name=tool_name) -> None:
+                    self._emit({
+                        "type": "tool_output_delta",
+                        "tool_call_id": _cid,
+                        "name": _name,
+                        "line": line,
+                    })
+
+                exec_res = execute_tool(
+                    tool_name, tool_input, self.executor,
+                    on_output=_on_tool_output,
+                )
 
                 output = str(exec_res)
                 if len(output) > 3000:
@@ -416,6 +431,7 @@ class AgentLoop:
                 self._emit({
                     "type": "tool_result",
                     "name": tool_name,
+                    "tool_call_id": _tc_id,
                     "output": output,
                     "success": exec_res.success,
                 })

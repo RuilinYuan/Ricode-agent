@@ -468,9 +468,10 @@ function renderHtml(): string {
     taskEl.style.height = Math.min(taskEl.scrollHeight, 120) + "px";
   });
 
-  function toolCard(name, input) {
+  // 工具卡片按 tool_call_id 索引（同一轮可能多个同名工具）
+  function toolCard(id, name, input) {
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card open";   // 运行时默认展开，方便看流式输出
     const arg = JSON.stringify(input || {});
     card.innerHTML =
       '<div class="card-head">' +
@@ -480,22 +481,46 @@ function renderHtml(): string {
         '<span class="arg">' + (arg.length > 60 ? arg.slice(0, 60) + "…" : arg) + "</span>" +
         '<span class="badge run">运行中</span>' +
       "</div>" +
-      '<div class="card-body"></div>';
+      '<div class="card-body streaming"></div>';
     card.querySelector(".card-head").onclick = () => card.classList.toggle("open");
     chat.appendChild(card); scrollBottom();
-    pendingCards[name] = card;
+    pendingCards[id || name] = card;
+    // 每个卡片维护自己的流式输出缓冲
+    card._streamLines = [];
     return card;
   }
 
-  function fillResult(name, output, success) {
-    const card = pendingCards[name];
+  // 工具执行中：逐行追加输出
+  function appendToolOutput(id, name, line) {
+    const card = pendingCards[id] || pendingCards[name];
+    if (!card) return;
+    const body = card.querySelector(".card-body");
+    card._streamLines = card._streamLines || [];
+    card._streamLines.push(line);
+    // 限制显示行数，避免超长输出卡界面（保留最后 200 行）
+    if (card._streamLines.length > 200) {
+      card._streamLines = card._streamLines.slice(-200);
+    }
+    body.textContent = card._streamLines.join("\\n");
+    scrollBottom();
+  }
+
+  function fillResult(id, name, output, success) {
+    const card = pendingCards[id] || pendingCards[name];
     if (!card) return;
     const badge = card.querySelector(".badge");
     badge.textContent = success ? "✓ 完成" : "✗ 失败";
     badge.className = "badge " + (success ? "ok" : "err");
-    card.querySelector(".card-body").textContent =
-      (output || "(无输出)").slice(0, 4000);
-    if (!success) card.classList.add("open");   // 失败自动展开
+    const body = card.querySelector(".card-body");
+    body.classList.remove("streaming");
+    // 用最终完整输出替换（可能比流式缓冲更完整/带截断提示）
+    body.textContent = (output || "(无输出)").slice(0, 4000);
+    // 成功且有流式输出时折叠，失败保持展开
+    if (success && card._streamLines && card._streamLines.length > 0) {
+      card.classList.remove("open");
+    } else if (!success) {
+      card.classList.add("open");
+    }
     scrollBottom();
   }
 
@@ -544,10 +569,14 @@ function renderHtml(): string {
         // 工具调用前重置流式元素（reasoning 结束）
         currentReasoningEl = null;
         currentReasoningText = "";
-        toolCard(ev.name, ev.input); break;
+        toolCard(ev.tool_call_id, ev.name, ev.input); break;
+
+      case "tool_output_delta":
+        // 工具执行中的流式输出，逐行追加
+        appendToolOutput(ev.tool_call_id, ev.name, ev.line); break;
 
       case "tool_result":
-        fillResult(ev.name, ev.output, ev.success); break;
+        fillResult(ev.tool_call_id, ev.name, ev.output, ev.success); break;
       case "compress":
         el("notice compress", "🗜 上下文压缩 L" + ev.level + "，节省 " + ev.tokens_saved + " tokens"); break;
       case "loop_signal":
