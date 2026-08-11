@@ -11,6 +11,7 @@ FastAPI 后端 — 供 VS Code 插件 / 第三方客户端调用
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import queue
 import threading
@@ -71,11 +72,25 @@ def run(req: RunRequest) -> StreamingResponse:
 
     threading.Thread(target=worker, daemon=True).start()
 
-    def event_stream():
+    async def event_stream():
+        """异步生成器：从 worker 线程的 queue 取事件，逐条推送。
+
+        用 asyncio.to_thread 包装阻塞的 queue.get，避免阻塞事件循环，
+        让 uvicorn 能在每个 yield 后立即 flush（否则同步生成器会被缓冲）。
+        """
+        loop = asyncio.get_event_loop()
         while True:
-            event = q.get()
+            event = await loop.run_in_executor(None, q.get)
             if event is None:
                 break
             yield f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 禁用 nginx/代理缓冲
+            "Connection": "keep-alive",
+        },
+    )
